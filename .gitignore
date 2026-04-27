@@ -1,218 +1,727 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[codz]
-*$py.class
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-# C extensions
-*.so
+"""
+╔══════════════════════════════════════════════════════════════╗
+║                       HOSTSHAIL                              ║
+║           Host Header Vulnerability Scanner                  ║
+║                                                              ║
+║  Author  : CyberShailendra                                   ║
+║  Version : 1.0.0                                             ║
+║  GitHub  : github.com/CyberShailendra/hostshail              ║
+║  License : MIT                                               ║
+╚══════════════════════════════════════════════════════════════╝
 
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
+Checks Performed:
+  1.  Basic Host Header Injection (reflection)
+  2.  Password Reset Poisoning
+  3.  Web Cache Poisoning via Host Header
+  4.  Open Redirect via Host Header
+  5.  SSRF via Host Header
+  6.  Absolute URL Injection in Request-Line
+  7.  HTTP Request Smuggling indicators
+  8.  Access Control Bypass (localhost spoof)
+  9.  Duplicate / Conflicting Host Headers
+  10. SNI vs Host Header Mismatch (HTTPS)
+  11. Response Fingerprinting
 
-# PyInstaller
-#   Usually these files are written by a python script from a template
-#   before PyInstaller builds the exe, so as to inject date/other infos into it.
-*.manifest
-*.spec
+Usage:
+  python3 hostshail.py -u https://target.com
+  python3 hostshail.py -u https://target.com -v
+  python3 hostshail.py -l targets.txt -o report.json
+  python3 hostshail.py -u https://target.com --proxy http://127.0.0.1:8080
+"""
 
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
+import argparse
+import sys
+import os
+import json
+import socket
+import ssl
+import urllib.parse
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py.cover
-.hypothesis/
-.pytest_cache/
-cover/
+try:
+    import requests
+    from requests.packages.urllib3.exceptions import InsecureRequestWarning
+    requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+except ImportError:
+    print("[!] requests not found. Run: pip3 install requests")
+    sys.exit(1)
 
-# Translations
-*.mo
-*.pot
+try:
+    from colorama import Fore, Back, Style, init
+    init(autoreset=True)
+    COLOR = True
+except ImportError:
+    COLOR = False
 
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
 
-# Flask stuff:
-instance/
-.webassets-cache
+# ── Color helpers ───────────────────────────────────────────────
+def red(t):     return (Fore.RED    + Style.BRIGHT + t + Style.RESET_ALL) if COLOR else t
+def green(t):   return (Fore.GREEN  + Style.BRIGHT + t + Style.RESET_ALL) if COLOR else t
+def yellow(t):  return (Fore.YELLOW + Style.BRIGHT + t + Style.RESET_ALL) if COLOR else t
+def cyan(t):    return (Fore.CYAN   + Style.BRIGHT + t + Style.RESET_ALL) if COLOR else t
+def blue(t):    return (Fore.BLUE   + Style.BRIGHT + t + Style.RESET_ALL) if COLOR else t
+def magenta(t): return (Fore.MAGENTA+ Style.BRIGHT + t + Style.RESET_ALL) if COLOR else t
+def bold(t):    return (Style.BRIGHT + t + Style.RESET_ALL) if COLOR else t
+def dim(t):     return (Style.DIM   + t + Style.RESET_ALL) if COLOR else t
 
-# Scrapy stuff:
-.scrapy
 
-# Sphinx documentation
-docs/_build/
+# ── Banner ──────────────────────────────────────────────────────
+BANNER = r"""
+  ██╗  ██╗ ██████╗ ███████╗████████╗███████╗██╗  ██╗ █████╗ ██╗██╗
+  ██║  ██║██╔═══██╗██╔════╝╚══██╔══╝██╔════╝██║  ██║██╔══██╗██║██║
+  ███████║██║   ██║███████╗   ██║   ███████╗███████║███████║██║██║
+  ██╔══██║██║   ██║╚════██║   ██║   ╚════██║██╔══██║██╔══██║██║██║
+  ██║  ██║╚██████╔╝███████║   ██║   ███████║██║  ██║██║  ██║██║███████╗
+  ╚═╝  ╚═╝ ╚═════╝ ╚══════╝   ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝╚══════╝
+"""
 
-# PyBuilder
-.pybuilder/
-target/
+def print_banner():
+    print(cyan(BANNER))
+    print(bold("        Host Header Vulnerability Scanner"))
+    print(yellow("        Author : CyberShailendra  |  v1.0.0"))
+    print(dim  ("        GitHub : github.com/CyberShailendra/hostshail\n"))
 
-# Jupyter Notebook
-.ipynb_checkpoints
 
-# IPython
-profile_default/
-ipython_config.py
+# ── Constants / payloads ────────────────────────────────────────
+ATTACKER_DOMAIN  = "evil.attacker.com"
+CANARY_TOKEN     = "hostshail-probe"
 
-# pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
-# .python-version
+INJECT_HEADERS = [
+    "X-Forwarded-Host",
+    "X-Host",
+    "X-HTTP-Host-Override",
+    "X-Forwarded-Server",
+    "X-Original-Host",
+    "X-Custom-Host",
+]
 
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-# Pipfile.lock
+RESET_PATHS = [
+    "/forgot-password", "/reset-password", "/password/reset",
+    "/account/recover",  "/auth/reset",     "/users/password",
+    "/api/password-reset",
+]
 
-# UV
-#   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-# uv.lock
+CACHE_PATHS = ["/", "/home", "/index.html", "/index.php",
+               "/static/main.js", "/static/style.css"]
 
-# poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
-# poetry.lock
-# poetry.toml
+CACHE_HEADERS = ["x-cache", "cf-cache-status", "x-varnish",
+                 "age", "x-drupal-cache", "x-proxy-cache",
+                 "x-cache-hits", "surrogate-key"]
 
-# pdm
-#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
-#   pdm recommends including project-wide configuration in pdm.toml, but excluding .pdm-python.
-#   https://pdm-project.org/en/latest/usage/project/#working-with-version-control
-# pdm.lock
-# pdm.toml
-.pdm-python
-.pdm-build/
+SSRF_PAYLOADS = [
+    "http://169.254.169.254/latest/meta-data/",   # AWS
+    "http://metadata.google.internal/",            # GCP
+    "http://100.100.100.200/latest/meta-data/",   # Alibaba
+    f"http://{ATTACKER_DOMAIN}/",
+    "http://localhost/",
+    "http://127.0.0.1/",
+]
 
-# pixi
-#   Similar to Pipfile.lock, it is generally recommended to include pixi.lock in version control.
-# pixi.lock
-#   Pixi creates a virtual environment in the .pixi directory, just like venv module creates one
-#   in the .venv directory. It is recommended not to include this directory in version control.
-.pixi
+CLOUD_INDICATORS = [
+    "ami-id", "instance-id", "computeMetadata",
+    "iam/security-credentials", "latest/meta-data",
+]
 
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
-__pypackages__/
+RESTRICTED_PATHS = [
+    "/admin", "/admin/", "/internal", "/management",
+    "/actuator", "/debug", "/.env", "/config",
+    "/api/admin", "/dashboard",
+]
 
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
+BYPASS_HEADERS = {
+    "X-Forwarded-For":   "127.0.0.1",
+    "X-Real-IP":         "127.0.0.1",
+    "True-Client-IP":    "127.0.0.1",
+    "CF-Connecting-IP":  "127.0.0.1",
+    "X-Originating-IP":  "127.0.0.1",
+    "X-Remote-IP":       "127.0.0.1",
+    "X-Client-IP":       "127.0.0.1",
+}
 
-# Redis
-*.rdb
-*.aof
-*.pid
+FINGERPRINT_HEADERS = [
+    "Server", "X-Powered-By", "X-AspNet-Version",
+    "X-Generator", "Via", "X-Varnish", "X-Cache",
+]
 
-# RabbitMQ
-mnesia/
-rabbitmq/
-rabbitmq-data/
 
-# ActiveMQ
-activemq-data/
+# ── Result model ────────────────────────────────────────────────
+class ScanResult:
+    def __init__(self, target):
+        self.target         = target
+        self.timestamp      = datetime.now().isoformat()
+        self.vulnerabilities = []
+        self.info           = []
+        self.errors         = []
 
-# SageMath parsed files
-*.sage.py
+    def add_vuln(self, check, severity, title, detail, evidence=None):
+        self.vulnerabilities.append({
+            "check":    check,
+            "severity": severity,
+            "title":    title,
+            "detail":   detail,
+            "evidence": evidence or {},
+        })
 
-# Environments
-.env
-.envrc
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
+    def to_dict(self):
+        s = self.vulnerabilities
+        return {
+            "target":          self.target,
+            "timestamp":       self.timestamp,
+            "vulnerabilities": s,
+            "info":            self.info,
+            "errors":          self.errors,
+            "summary": {
+                "total":    len(s),
+                "critical": sum(1 for v in s if v["severity"] == "CRITICAL"),
+                "high":     sum(1 for v in s if v["severity"] == "HIGH"),
+                "medium":   sum(1 for v in s if v["severity"] == "MEDIUM"),
+                "low":      sum(1 for v in s if v["severity"] == "LOW"),
+                "info":     sum(1 for v in s if v["severity"] == "INFO"),
+            },
+        }
 
-# Spyder project settings
-.spyderproject
-.spyproject
 
-# Rope project settings
-.ropeproject
+# ── HTTP client ─────────────────────────────────────────────────
+class HttpClient:
+    DEFAULT_UA = (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    )
 
-# mkdocs documentation
-/site
+    def __init__(self, proxy=None, timeout=10, verify=False, user_agent=None):
+        self.session = requests.Session()
+        self.timeout = timeout
+        self.verify  = verify
+        self.proxies = {"http": proxy, "https": proxy} if proxy else {}
+        self.ua      = user_agent or self.DEFAULT_UA
 
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
+    def _hdrs(self, extra=None):
+        h = {"User-Agent": self.ua}
+        if extra:
+            h.update(extra)
+        return h
 
-# Pyre type checker
-.pyre/
+    def get(self, url, headers=None, allow_redirects=True):
+        try:
+            return self.session.get(
+                url, headers=self._hdrs(headers),
+                timeout=self.timeout, verify=self.verify,
+                proxies=self.proxies, allow_redirects=allow_redirects,
+            )
+        except Exception:
+            return None
 
-# pytype static type analyzer
-.pytype/
+    def post(self, url, data=None, headers=None, allow_redirects=True):
+        try:
+            return self.session.post(
+                url, data=data, headers=self._hdrs(headers),
+                timeout=self.timeout, verify=self.verify,
+                proxies=self.proxies, allow_redirects=allow_redirects,
+            )
+        except Exception:
+            return None
 
-# Cython debug symbols
-cython_debug/
 
-# PyCharm
-#   JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#   be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#   and can be added to the global gitignore or merged into this file.  For a more nuclear
-#   option (not recommended) you can uncomment the following to ignore the entire idea folder.
-# .idea/
+# ── Scanner ──────────────────────────────────────────────────────
+class HostHeaderScanner:
 
-# Abstra
-#   Abstra is an AI-powered process automation framework.
-#   Ignore directories containing user credentials, local state, and settings.
-#   Learn more at https://abstra.io/docs
-.abstra/
+    def __init__(self, target, http: HttpClient, result: ScanResult, verbose=False):
+        self.target  = target.rstrip("/")
+        self.http    = http
+        self.result  = result
+        self.verbose = verbose
+        parsed       = urllib.parse.urlparse(self.target)
+        self.host    = parsed.netloc
+        self.scheme  = parsed.scheme
 
-# Visual Studio Code
-#   Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 
-#   that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
-#   and can be added to the global gitignore or merged into this file. However, if you prefer, 
-#   you could uncomment the following to ignore the entire vscode folder
-# .vscode/
-# Temporary file for partial code execution
-tempCodeRunnerFile.py
+    # ─ Helpers ──────────────────────────────────────────────────
+    def _log(self, msg):
+        if self.verbose:
+            print(dim(f"    [~] {msg}"))
 
-# Ruff stuff:
-.ruff_cache/
+    @staticmethod
+    def _sev_tag(sev):
+        return {
+            "CRITICAL": red("[CRITICAL]"),
+            "HIGH":     red("[HIGH]    "),
+            "MEDIUM":   yellow("[MEDIUM]  "),
+            "LOW":      cyan("[LOW]     "),
+            "INFO":     blue("[INFO]    "),
+        }.get(sev, "[?]")
 
-# PyPI configuration file
-.pypirc
+    def _found(self, sev, title, detail, evidence=None, check="generic"):
+        print(f"  {self._sev_tag(sev)} {bold(title)}")
+        print(dim(f"           ↳ {detail}"))
+        if evidence:
+            for k, v in evidence.items():
+                print(dim(f"           · {k}: {v}"))
+        self.result.add_vuln(check, sev, title, detail, evidence)
 
-# Marimo
-marimo/_static/
-marimo/_lsp/
-__marimo__/
+    def _section(self, num, name):
+        print(f"\n  {cyan('──')} Check {num}: {bold(name)}")
 
-# Streamlit
-.streamlit/secrets.toml
+    # ─ 1. Basic Host Injection ──────────────────────────────────
+    def check_basic_injection(self):
+        self._section(1, "Basic Host Header Injection")
+        payloads = [ATTACKER_DOMAIN, f"{ATTACKER_DOMAIN}:80", f"x.{ATTACKER_DOMAIN}"]
+        for hdr in ["Host"] + INJECT_HEADERS[:4]:
+            for payload in payloads:
+                self._log(f"{hdr}: {payload}")
+                r = self.http.get(self.target, headers={hdr: payload})
+                if not r:
+                    continue
+                reflected = payload in r.text or payload in str(r.headers)
+                if reflected:
+                    self._found(
+                        "HIGH",
+                        f"Host Header Injection via '{hdr}'",
+                        f"Injected value '{payload}' reflected in the response body/headers.",
+                        {"Header": hdr, "Payload": payload, "HTTP Status": r.status_code},
+                        "basic_injection",
+                    )
+
+    # ─ 2. Password Reset Poisoning ──────────────────────────────
+    def check_password_reset_poisoning(self):
+        self._section(2, "Password Reset Poisoning")
+        for path in RESET_PATHS:
+            url = f"{self.target}{path}"
+            for hdr in ["Host", "X-Forwarded-Host"]:
+                self._log(f"POST {path} | {hdr}: {ATTACKER_DOMAIN}")
+                r = self.http.post(
+                    url,
+                    data={"email": f"victim@example.com"},
+                    headers={hdr: ATTACKER_DOMAIN},
+                )
+                if not r:
+                    continue
+                if r.status_code in (200, 201, 202, 302):
+                    self._found(
+                        "CRITICAL",
+                        f"Potential Password Reset Poisoning at '{path}'",
+                        (
+                            "Reset endpoint accepted injected host. If reset links are built "
+                            "server-side from the Host header, attacker-controlled URLs may be "
+                            "emailed to victims."
+                        ),
+                        {"Path": path, "Injected Header": hdr,
+                         "Injected Value": ATTACKER_DOMAIN, "HTTP Status": r.status_code},
+                        "password_reset_poisoning",
+                    )
+
+    # ─ 3. Web Cache Poisoning ───────────────────────────────────
+    def check_cache_poisoning(self):
+        self._section(3, "Web Cache Poisoning via Host Header")
+        for path in CACHE_PATHS:
+            url = f"{self.target}{path}"
+            r0 = self.http.get(url)
+            if not r0:
+                continue
+
+            present = [h for h in CACHE_HEADERS if h in {k.lower() for k in r0.headers}]
+            if not present:
+                self._log(f"No cache headers at {path}")
+                continue
+
+            # Poison
+            r1 = self.http.get(url, headers={"X-Forwarded-Host": ATTACKER_DOMAIN})
+            if not r1:
+                continue
+
+            # Clean re-fetch
+            r2 = self.http.get(url)
+            if not r2:
+                continue
+
+            if ATTACKER_DOMAIN in (r2.text or ""):
+                self._found(
+                    "CRITICAL",
+                    f"Web Cache Poisoning Confirmed at '{path}'",
+                    "Injected Host value persisted in cache; reflected in a subsequent clean request.",
+                    {"Path": path, "Cache Headers": str(present)},
+                    "cache_poisoning",
+                )
+            elif ATTACKER_DOMAIN in (r1.text or ""):
+                self._found(
+                    "MEDIUM",
+                    f"Potential Cache Poisoning Vector at '{path}'",
+                    "Cache headers present and injected value reflected in response; manual confirmation advised.",
+                    {"Path": path, "Cache Headers": str(present)},
+                    "cache_poisoning",
+                )
+
+    # ─ 4. Open Redirect ─────────────────────────────────────────
+    def check_open_redirect(self):
+        self._section(4, "Open Redirect via Host Header")
+        for hdr in ["Host", "X-Forwarded-Host"]:
+            r = self.http.get(
+                self.target,
+                headers={hdr: ATTACKER_DOMAIN},
+                allow_redirects=False,
+            )
+            if not r:
+                continue
+            loc = r.headers.get("Location", "")
+            if r.status_code in (301, 302, 303, 307, 308) and ATTACKER_DOMAIN in loc:
+                self._found(
+                    "HIGH",
+                    f"Open Redirect via '{hdr}' Header",
+                    "Server issued a redirect whose Location header contains the injected domain.",
+                    {"Header": hdr, "Location": loc, "HTTP Status": r.status_code},
+                    "open_redirect",
+                )
+
+    # ─ 5. SSRF via Host Header ──────────────────────────────────
+    def check_ssrf(self):
+        self._section(5, "SSRF via Host Header")
+        for hdr in ["Host", "X-Forwarded-Host", "X-Forwarded-For", "True-Client-IP"]:
+            for payload in SSRF_PAYLOADS:
+                self._log(f"{hdr}: {payload}")
+                r = self.http.get(self.target, headers={hdr: payload})
+                if not r:
+                    continue
+                for indicator in CLOUD_INDICATORS:
+                    if indicator in (r.text or ""):
+                        self._found(
+                            "CRITICAL",
+                            f"SSRF via '{hdr}' — Cloud Metadata Exposed",
+                            "Response contains cloud-metadata keywords, indicating a successful SSRF.",
+                            {"Header": hdr, "Payload": payload, "Indicator": indicator},
+                            "ssrf",
+                        )
+
+    # ─ 6. Absolute URL Injection ─────────────────────────────────
+    def check_absolute_url(self):
+        self._section(6, "Absolute URL Injection in Request-Line")
+        try:
+            parsed = urllib.parse.urlparse(self.target)
+            host   = parsed.hostname
+            port   = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+            if parsed.scheme == "https":
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                raw = socket.create_connection((host, port), timeout=8)
+                s   = ctx.wrap_socket(raw, server_hostname=host)
+            else:
+                s = socket.create_connection((host, port), timeout=8)
+
+            req = (
+                f"GET http://{ATTACKER_DOMAIN}/ HTTP/1.1\r\n"
+                f"Host: {host}\r\n"
+                f"User-Agent: {self.http.ua}\r\n"
+                f"Connection: close\r\n\r\n"
+            )
+            s.sendall(req.encode())
+            resp = b""
+            while True:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                resp += chunk
+            s.close()
+
+            if ATTACKER_DOMAIN.encode() in resp:
+                self._found(
+                    "HIGH",
+                    "Absolute URL Injection in Request-Line Accepted",
+                    "Server honoured a foreign absolute URL placed in the HTTP request-line.",
+                    {"Request-Line": f"GET http://{ATTACKER_DOMAIN}/ HTTP/1.1"},
+                    "absolute_url",
+                )
+        except Exception as e:
+            self._log(f"Absolute URL check skipped: {e}")
+
+    # ─ 7. HTTP Request Smuggling indicators ─────────────────────
+    def check_smuggling_indicators(self):
+        self._section(7, "HTTP Request Smuggling (Ambiguous Headers)")
+        test_cases = [
+            {"Transfer-Encoding": "chunked", "Content-Length": "0"},
+            {"Transfer-Encoding": " chunked"},
+            {"Transfer-Encoding": "chunked, identity"},
+            {"Transfer-Encoding": "xchunked"},
+        ]
+        for extra in test_cases:
+            r = self.http.post(self.target, data="0\r\n\r\n", headers=extra)
+            if r and r.status_code == 200:
+                self._found(
+                    "MEDIUM",
+                    "Possible HTTP Request Smuggling Vector",
+                    "Server returned 200 for a POST with ambiguous Transfer-Encoding. "
+                    "Manual TE.CL / CL.TE testing is recommended.",
+                    {"Test Headers": str(extra), "HTTP Status": r.status_code},
+                    "smuggling",
+                )
+                break
+
+    # ─ 8. Access Control Bypass ─────────────────────────────────
+    def check_access_control_bypass(self):
+        self._section(8, "Access Control Bypass via Host / IP Spoofing Headers")
+        for path in RESTRICTED_PATHS:
+            url = f"{self.target}{path}"
+            r0  = self.http.get(url)
+            if not r0 or r0.status_code not in (401, 403):
+                continue
+            for hdr, val in BYPASS_HEADERS.items():
+                r = self.http.get(url, headers={hdr: val})
+                if r and r.status_code in (200, 201, 202):
+                    self._found(
+                        "HIGH",
+                        f"Access Control Bypass via '{hdr}: {val}'",
+                        f"Path '{path}' returned {r.status_code} when spoofed with {hdr}: {val} "
+                        f"(baseline was {r0.status_code}).",
+                        {"Path": path, "Header": f"{hdr}: {val}",
+                         "Baseline Status": r0.status_code, "Bypassed Status": r.status_code},
+                        "acl_bypass",
+                    )
+
+    # ─ 9. Duplicate / Conflicting Host Headers ───────────────────
+    def check_duplicate_host(self):
+        self._section(9, "Conflicting Host Headers")
+        r = self.http.get(
+            self.target,
+            headers={
+                "X-Forwarded-Host": ATTACKER_DOMAIN,
+                "X-Host":           ATTACKER_DOMAIN,
+            },
+        )
+        if r and ATTACKER_DOMAIN in (r.text or ""):
+            self._found(
+                "MEDIUM",
+                "Conflicting Host Headers Lead to Injection",
+                "Server preferred the injected X-Forwarded-Host / X-Host over the real Host header.",
+                {"Reflected Domain": ATTACKER_DOMAIN},
+                "duplicate_host",
+            )
+
+    # ─ 10. SNI vs Host Header Mismatch ──────────────────────────
+    def check_sni_mismatch(self):
+        self._section(10, "SNI vs Host Header Mismatch (HTTPS)")
+        if self.scheme != "https":
+            self._log("Skipped — target is not HTTPS")
+            return
+        try:
+            parsed = urllib.parse.urlparse(self.target)
+            host   = parsed.hostname
+            port   = parsed.port or 443
+            ctx    = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode    = ssl.CERT_NONE
+
+            raw  = socket.create_connection((host, port), timeout=8)
+            conn = ctx.wrap_socket(raw, server_hostname=host)
+
+            req = (
+                f"GET / HTTP/1.1\r\n"
+                f"Host: {ATTACKER_DOMAIN}\r\n"
+                f"User-Agent: {self.http.ua}\r\n"
+                f"Connection: close\r\n\r\n"
+            )
+            conn.sendall(req.encode())
+            resp = b""
+            while True:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                resp += chunk
+            conn.close()
+
+            status_line = resp[:20]
+            if b"200" in status_line or b"301" in status_line or b"302" in status_line:
+                self._found(
+                    "LOW",
+                    "SNI vs Host Header Mismatch Accepted",
+                    "TLS SNI used the real hostname, but Host header carried the attacker domain — "
+                    "server responded normally, indicating a lax virtual-host check.",
+                    {"TLS SNI": host, "Host Header": ATTACKER_DOMAIN},
+                    "sni_mismatch",
+                )
+        except Exception as e:
+            self._log(f"SNI mismatch check skipped: {e}")
+
+    # ─ 11. Technology Fingerprint ───────────────────────────────
+    def check_fingerprint(self):
+        self._section(11, "Response Fingerprint (Informational)")
+        r = self.http.get(self.target)
+        if not r:
+            return
+        found = {h: r.headers[h] for h in FINGERPRINT_HEADERS if h in r.headers}
+        if found:
+            self.result.info.append(f"Fingerprint: {found}")
+            print(dim(f"    [i] {found}"))
+
+    # ─ Run all checks ────────────────────────────────────────────
+    def run(self):
+        checks = [
+            self.check_basic_injection,
+            self.check_password_reset_poisoning,
+            self.check_cache_poisoning,
+            self.check_open_redirect,
+            self.check_ssrf,
+            self.check_absolute_url,
+            self.check_smuggling_indicators,
+            self.check_access_control_bypass,
+            self.check_duplicate_host,
+            self.check_sni_mismatch,
+            self.check_fingerprint,
+        ]
+        for chk in checks:
+            try:
+                chk()
+            except Exception as e:
+                self.result.errors.append(f"{chk.__name__}: {e}")
+                self._log(f"Error in {chk.__name__}: {e}")
+
+
+# ── Summary printer ─────────────────────────────────────────────
+def print_summary(result: ScanResult):
+    d = result.to_dict()
+    s = d["summary"]
+    v = d["vulnerabilities"]
+
+    print("\n  " + "═" * 61)
+    print(f"  {bold('SCAN SUMMARY')}  {dim(result.target)}")
+    print("  " + "═" * 61)
+    print(
+        f"  {red('Critical')}: {s['critical']}   "
+        f"{red('High')}: {s['high']}   "
+        f"{yellow('Medium')}: {s['medium']}   "
+        f"{cyan('Low')}: {s['low']}   "
+        f"{blue('Info')}: {s['info']}"
+    )
+    print(f"  Total findings: {bold(str(s['total']))}\n")
+
+    if v:
+        for item in v:
+            sev   = item["severity"]
+            label = red(sev) if sev in ("CRITICAL", "HIGH") else \
+                    yellow(sev) if sev == "MEDIUM" else cyan(sev)
+            print(f"  [{label}] {item['title']}")
+    else:
+        print(green("  No vulnerabilities detected."))
+
+    print("  " + "═" * 61 + "\n")
+
+
+# ── Report writer ────────────────────────────────────────────────
+def save_report(results, outfile):
+    data = [r.to_dict() for r in results]
+    if outfile.endswith(".json"):
+        with open(outfile, "w") as f:
+            json.dump(data, f, indent=2)
+    else:
+        with open(outfile, "w") as f:
+            for d in data:
+                f.write(f"{'='*62}\n")
+                f.write(f"Target    : {d['target']}\n")
+                f.write(f"Timestamp : {d['timestamp']}\n")
+                f.write(f"Summary   : {d['summary']}\n\n")
+                for v in d["vulnerabilities"]:
+                    f.write(f"  [{v['severity']}] {v['title']}\n")
+                    f.write(f"    {v['detail']}\n")
+                    if v.get("evidence"):
+                        f.write(f"    Evidence: {v['evidence']}\n")
+                    f.write("\n")
+    print(green(f"\n[+] Report saved → {outfile}"))
+
+
+# ── Argument parser ──────────────────────────────────────────────
+def parse_args():
+    p = argparse.ArgumentParser(
+        prog="hostshail",
+        description="Host Header Vulnerability Scanner | Author: CyberShailendra",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python3 hostshail.py -u https://target.com
+  python3 hostshail.py -u https://target.com -v
+  python3 hostshail.py -l targets.txt -o report.json
+  python3 hostshail.py -u https://target.com --proxy http://127.0.0.1:8080
+  python3 hostshail.py -u https://target.com --timeout 15 -o results.txt
+        """
+    )
+    p.add_argument("-u",  "--url",     help="Single target URL")
+    p.add_argument("-l",  "--list",    help="File with target URLs (one per line)")
+    p.add_argument("-o",  "--output",  help="Output file (report.json or report.txt)")
+    p.add_argument("-v",  "--verbose", action="store_true", help="Verbose output")
+    p.add_argument("-t",  "--threads", type=int, default=5,
+                   help="Threads for multi-target scanning (default: 5)")
+    p.add_argument("--timeout",        type=int, default=10,
+                   help="Request timeout in seconds (default: 10)")
+    p.add_argument("--proxy",          help="Proxy URL  e.g. http://127.0.0.1:8080")
+    p.add_argument("--ua",             help="Custom User-Agent string")
+    p.add_argument("--version",        action="version",
+                   version="hostshail 1.0.0 | Author: CyberShailendra")
+    return p.parse_args()
+
+
+# ── Per-target scan ──────────────────────────────────────────────
+def scan_target(target: str, args) -> ScanResult:
+    if not target.startswith("http"):
+        target = "https://" + target
+
+    result = ScanResult(target)
+    http   = HttpClient(
+        proxy      = args.proxy,
+        timeout    = args.timeout,
+        verify     = False,
+        user_agent = args.ua,
+    )
+
+    print("\n  " + "─" * 61)
+    print(f"  {bold('Target:')} {cyan(target)}")
+    print("  " + "─" * 61)
+
+    HostHeaderScanner(target, http, result, verbose=args.verbose).run()
+    print_summary(result)
+    return result
+
+
+# ── Entry point ──────────────────────────────────────────────────
+def main():
+    print_banner()
+    args = parse_args()
+
+    targets = []
+    if args.url:
+        targets.append(args.url.strip())
+    elif args.list:
+        if not os.path.isfile(args.list):
+            print(red(f"[!] File not found: {args.list}"))
+            sys.exit(1)
+        with open(args.list) as f:
+            targets = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
+    else:
+        print(red("[!] Provide -u <URL> or -l <targets-file>"))
+        sys.exit(1)
+
+    if not targets:
+        print(red("[!] No targets to scan."))
+        sys.exit(1)
+
+    results = []
+
+    if len(targets) == 1:
+        results.append(scan_target(targets[0], args))
+    else:
+        with ThreadPoolExecutor(max_workers=args.threads) as ex:
+            fmap = {ex.submit(scan_target, t, args): t for t in targets}
+            for fut in as_completed(fmap):
+                try:
+                    results.append(fut.result())
+                except Exception as e:
+                    print(red(f"[!] Error scanning {fmap[fut]}: {e}"))
+
+    if args.output:
+        save_report(results, args.output)
+
+    total = sum(len(r.vulnerabilities) for r in results)
+    sys.exit(0 if total == 0 else 1)
+
+
+if __name__ == "__main__":
+    main()
